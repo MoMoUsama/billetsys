@@ -17,7 +17,8 @@ public class ReportData {
     public Map<String, Long> ticketsByCategory;
     public Map<String, Long> ticketsByCompany;
     public Map<String, Long> ticketsOverTime;
-    public Map<String, Double> avgFirstResponseTime;
+    public Map<String, TimeStat> firstResponseTimeStats;
     public Map<String, Double> avgResolutionTime;
+    public Map<String, PickupTimeStat> pickupTimeStats;
     public Map<String, List<Ticket>> resolutionHistogram;
 }

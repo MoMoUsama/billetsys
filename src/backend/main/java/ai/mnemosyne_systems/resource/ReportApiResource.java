@@ -11,12 +11,20 @@ package ai.mnemosyne_systems.resource;
 import ai.mnemosyne_systems.model.Category;
 import ai.mnemosyne_systems.model.Company;
 import ai.mnemosyne_systems.model.Message;
+import ai.mnemosyne_systems.model.PickupTimeStat;
 import ai.mnemosyne_systems.model.ReportData;
+import ai.mnemosyne_systems.model.TimeStat;
 import ai.mnemosyne_systems.model.Ticket;
 import ai.mnemosyne_systems.model.User;
+import ai.mnemosyne_systems.model.event.Event;
+import ai.mnemosyne_systems.model.event.EventConstants;
 import ai.mnemosyne_systems.util.AuthHelper;
+import ai.mnemosyne_systems.util.CurrentUser;
+import ai.mnemosyne_systems.util.TicketTimeSupport;
+import jakarta.annotation.security.RolesAllowed;
+import jakarta.inject.Inject;
 import jakarta.transaction.Transactional;
-import jakarta.ws.rs.CookieParam;
+
 import jakarta.ws.rs.GET;
 import jakarta.ws.rs.NotAuthorizedException;
 import jakarta.ws.rs.Path;
@@ -27,6 +35,7 @@ import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
 import java.net.URI;
 import java.time.Duration;
+import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -36,6 +45,7 @@ import java.util.TreeMap;
 
 @Path("/api/reports")
 @Produces(MediaType.APPLICATION_JSON)
+@RolesAllowed({ "admin", "tam", "superuser" })
 public class ReportApiResource {
     private static final String BUCKET_UNDER_1H = "< 1h";
     private static final String BUCKET_1_TO_8H = "1–8h";
@@ -43,11 +53,13 @@ public class ReportApiResource {
     private static final String BUCKET_1_TO_7D = "1–7 days";
     private static final String BUCKET_OVER_7D = "> 7 days";
 
+    @Inject
+    CurrentUser currentUser;
+
     @GET
     @Transactional
-    public ReportResponse reports(@CookieParam(AuthHelper.AUTH_COOKIE) String auth,
-            @QueryParam("companyId") Long companyId, @QueryParam("period") String period) {
-        User user = requireReporter(auth);
+    public ReportResponse reports(@QueryParam("companyId") Long companyId, @QueryParam("period") String period) {
+        User user = currentUser.get();
         String safePeriod = period == null || period.isBlank() ? "all" : period.toLowerCase();
         if (AuthHelper.isAdmin(user)) {
             List<Company> companies = Company.list(
@@ -88,8 +100,8 @@ public class ReportApiResource {
                 selectedCompany == null ? "All" : selectedCompany.name, showCompanyFilter, showCompanyChart, exportPath,
                 period, data.totalTickets, toPoints(data.ticketsByStatus), toPoints(data.ticketsByCategory),
                 toPoints(data.ticketsByCompany), toPoints(data.ticketsOverTime),
-                toDoublePoints(data.avgFirstResponseTime), toDoublePoints(data.avgResolutionTime),
-                toHistogram(data.resolutionHistogram));
+                toTimeStatPoints(data.firstResponseTimeStats), toDoublePoints(data.avgResolutionTime),
+                toStatPoints(data.pickupTimeStats), toHistogram(data.resolutionHistogram));
     }
 
     private List<MetricPoint> toPoints(Map<String, Long> values) {
@@ -101,6 +113,16 @@ public class ReportApiResource {
                 .toList();
     }
 
+    private List<StatMetricPoint> toStatPoints(Map<String, PickupTimeStat> values) {
+        return values.entrySet().stream().map(entry -> new StatMetricPoint(entry.getKey(), entry.getValue().min(),
+                entry.getValue().avg(), entry.getValue().max())).toList();
+    }
+
+    private List<StatMetricPoint> toTimeStatPoints(Map<String, TimeStat> values) {
+        return values.entrySet().stream().map(entry -> new StatMetricPoint(entry.getKey(), entry.getValue().min(),
+                entry.getValue().avg(), entry.getValue().max())).toList();
+    }
+
     private List<HistogramBucket> toHistogram(Map<String, List<Ticket>> histogram) {
         return histogram.entrySet().stream()
                 .map(entry -> new HistogramBucket(entry.getKey(), entry.getValue().size(),
@@ -110,18 +132,6 @@ public class ReportApiResource {
                                         ticket.category == null ? null : ticket.category.name))
                                 .toList()))
                 .toList();
-    }
-
-    private User requireReporter(String auth) {
-        User user = AuthHelper.findUser(auth);
-        if (user == null) {
-            throw new NotAuthorizedException(Response.status(Response.Status.UNAUTHORIZED).build());
-        }
-        if (AuthHelper.isAdmin(user) || User.TYPE_TAM.equalsIgnoreCase(user.type)
-                || User.TYPE_SUPERUSER.equalsIgnoreCase(user.type)) {
-            return user;
-        }
-        throw new WebApplicationException(Response.status(Response.Status.FORBIDDEN).location(URI.create("/")).build());
     }
 
     private ReportData buildReportData(List<Company> filterCompanies, String period) {
@@ -158,8 +168,9 @@ public class ReportApiResource {
         data.ticketsByCategory = buildTicketsByCategory(tickets);
         data.ticketsByCompany = buildTicketsByCompany(tickets);
         data.ticketsOverTime = buildTicketsOverTime(messagesByTicket, period);
-        data.avgFirstResponseTime = buildAvgFirstResponseTime(tickets, messagesByTicket);
+        data.firstResponseTimeStats = buildFirstResponseTimeStats(tickets, messagesByTicket);
         data.avgResolutionTime = buildAvgResolutionTime(tickets, messagesByTicket);
+        data.pickupTimeStats = buildPickupTimeStats(tickets);
         data.resolutionHistogram = buildResolutionHistogram(tickets, messagesByTicket);
         return data;
     }
@@ -225,7 +236,7 @@ public class ReportApiResource {
         return result;
     }
 
-    private Map<String, Double> buildAvgFirstResponseTime(List<Ticket> tickets,
+    private Map<String, TimeStat> buildFirstResponseTimeStats(List<Ticket> tickets,
             Map<Long, List<Message>> messagesByTicket) {
         Map<String, List<Double>> hoursByCategory = new LinkedHashMap<>();
         for (Ticket ticket : tickets) {
@@ -251,13 +262,18 @@ public class ReportApiResource {
                     : "Uncategorized";
             hoursByCategory.computeIfAbsent(category, ignored -> new ArrayList<>()).add(Math.max(hours, 0));
         }
-        Map<String, Double> unsorted = new LinkedHashMap<>();
+        Map<String, TimeStat> unsorted = new LinkedHashMap<>();
         for (Map.Entry<String, List<Double>> entry : hoursByCategory.entrySet()) {
-            double average = entry.getValue().stream().mapToDouble(Double::doubleValue).average().orElse(0.0);
-            unsorted.put(entry.getKey(), Math.round(average * 10.0) / 10.0);
+            List<Double> values = entry.getValue();
+            double min = values.stream().mapToDouble(Double::doubleValue).min().orElse(0.0);
+            double average = values.stream().mapToDouble(Double::doubleValue).average().orElse(0.0);
+            double max = values.stream().mapToDouble(Double::doubleValue).max().orElse(0.0);
+            unsorted.put(entry.getKey(), new TimeStat(Math.round(min * 10.0) / 10.0, Math.round(average * 10.0) / 10.0,
+                    Math.round(max * 10.0) / 10.0));
         }
-        Map<String, Double> result = new LinkedHashMap<>();
-        unsorted.entrySet().stream().sorted(Map.Entry.<String, Double> comparingByValue().reversed())
+        Map<String, TimeStat> result = new LinkedHashMap<>();
+        unsorted.entrySet().stream()
+                .sorted((left, right) -> Double.compare(right.getValue().avg(), left.getValue().avg()))
                 .forEachOrdered(entry -> result.put(entry.getKey(), entry.getValue()));
         return result;
     }
@@ -290,6 +306,67 @@ public class ReportApiResource {
         }
         Map<String, Double> result = new LinkedHashMap<>();
         unsorted.entrySet().stream().sorted(Map.Entry.<String, Double> comparingByValue().reversed())
+                .forEachOrdered(entry -> result.put(entry.getKey(), entry.getValue()));
+        return result;
+    }
+
+    private Map<String, PickupTimeStat> buildPickupTimeStats(List<Ticket> tickets) {
+        Map<Long, LocalDateTime> openedByTicket = new LinkedHashMap<>();
+        Map<Long, LocalDateTime> assignedByTicket = new LinkedHashMap<>();
+        List<Long> ticketIds = new ArrayList<>();
+        for (Ticket ticket : tickets) {
+            if (ticket.id != null) {
+                ticketIds.add(ticket.id);
+            }
+        }
+        if (!ticketIds.isEmpty()) {
+            List<Event> events = Event.find("key in ?1 and eventType in ?2 order by createdAt asc", ticketIds,
+                    List.of(EventConstants.TICKET_OPENED, EventConstants.TICKET_ASSIGNED)).list();
+            for (Event event : events) {
+                if (event.key == null || event.createdAt == null || event.eventType == null) {
+                    continue;
+                }
+                if (event.eventType == EventConstants.TICKET_OPENED) {
+                    openedByTicket.putIfAbsent(event.key, event.createdAt);
+                }
+            }
+            for (Event event : events) {
+                if (event.key == null || event.createdAt == null || event.eventType == null) {
+                    continue;
+                }
+                if (event.eventType == EventConstants.TICKET_ASSIGNED && !assignedByTicket.containsKey(event.key)) {
+                    LocalDateTime opened = openedByTicket.get(event.key);
+                    if (opened != null && !event.createdAt.isBefore(opened)) {
+                        assignedByTicket.put(event.key, event.createdAt);
+                    }
+                }
+            }
+        }
+        LocalDateTime now = LocalDateTime.now();
+        Map<String, List<Double>> hoursByCategory = new LinkedHashMap<>();
+        for (Ticket ticket : tickets) {
+            LocalDateTime opened = openedByTicket.get(ticket.id);
+            if (opened == null) {
+                continue;
+            }
+            LocalDateTime assigned = assignedByTicket.getOrDefault(ticket.id, now);
+            double hours = TicketTimeSupport.elapsedMinutes(opened, assigned) / 60.0;
+            String category = ticket.category != null && ticket.category.name != null ? ticket.category.name
+                    : "Uncategorized";
+            hoursByCategory.computeIfAbsent(category, ignored -> new ArrayList<>()).add(hours);
+        }
+        Map<String, PickupTimeStat> unsorted = new LinkedHashMap<>();
+        for (Map.Entry<String, List<Double>> entry : hoursByCategory.entrySet()) {
+            List<Double> values = entry.getValue();
+            double min = values.stream().mapToDouble(Double::doubleValue).min().orElse(0.0);
+            double average = values.stream().mapToDouble(Double::doubleValue).average().orElse(0.0);
+            double max = values.stream().mapToDouble(Double::doubleValue).max().orElse(0.0);
+            unsorted.put(entry.getKey(), new PickupTimeStat(Math.round(min * 10.0) / 10.0,
+                    Math.round(average * 10.0) / 10.0, Math.round(max * 10.0) / 10.0));
+        }
+        Map<String, PickupTimeStat> result = new LinkedHashMap<>();
+        unsorted.entrySet().stream()
+                .sorted((left, right) -> Double.compare(right.getValue().avg(), left.getValue().avg()))
                 .forEachOrdered(entry -> result.put(entry.getKey(), entry.getValue()));
         return result;
     }
@@ -335,8 +412,8 @@ public class ReportApiResource {
     public record ReportResponse(String role, List<CompanyOption> companies, Long selectedCompanyId, String companyName,
             boolean showCompanyFilter, boolean showCompanyChart, String exportPath, String period, int totalTickets,
             List<MetricPoint> status, List<MetricPoint> category, List<MetricPoint> company, List<MetricPoint> timeline,
-            List<DoubleMetricPoint> firstResponse, List<DoubleMetricPoint> resolutionTime,
-            List<HistogramBucket> histogram) {
+            List<StatMetricPoint> firstResponse, List<DoubleMetricPoint> resolutionTime,
+            List<StatMetricPoint> pickupTime, List<HistogramBucket> histogram) {
     }
 
     public record CompanyOption(Long id, String name) {
@@ -346,6 +423,9 @@ public class ReportApiResource {
     }
 
     public record DoubleMetricPoint(String label, Double value) {
+    }
+
+    public record StatMetricPoint(String label, Double min, Double avg, Double max) {
     }
 
     public record HistogramBucket(String label, int count, List<TicketSummary> tickets) {

@@ -21,6 +21,13 @@ export interface ReportHistogramBucket {
   tickets: TicketListItem[];
 }
 
+export interface ReportStatPoint {
+  label: string;
+  min: number;
+  avg: number;
+  max: number;
+}
+
 export interface ReportData {
   exportPath?: string;
   selectedCompanyId?: string | number;
@@ -33,7 +40,8 @@ export interface ReportData {
   category?: ReportChartPoint[];
   company?: ReportChartPoint[];
   timeline?: ReportChartPoint[];
-  firstResponse?: ReportChartPoint[];
+  firstResponse?: ReportStatPoint[];
   resolutionTime?: ReportChartPoint[];
+  pickupTime?: ReportStatPoint[];
   histogram?: ReportHistogramBucket[];
 }

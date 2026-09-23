@@ -9,15 +9,21 @@
 package ai.mnemosyne_systems.resource;
 
 import ai.mnemosyne_systems.model.*;
+import ai.mnemosyne_systems.model.event.Event;
+import ai.mnemosyne_systems.model.event.EventConstants;
 import ai.mnemosyne_systems.service.PdfService;
 import ai.mnemosyne_systems.util.AuthHelper;
+import ai.mnemosyne_systems.util.CurrentUser;
+import ai.mnemosyne_systems.util.TicketTimeSupport;
 import io.smallrye.common.annotation.Blocking;
+import jakarta.annotation.security.RolesAllowed;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.*;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
 import java.net.URI;
 import java.time.Duration;
+import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -28,6 +34,7 @@ import java.util.TreeMap;
 @Path("/reports")
 @Produces(MediaType.TEXT_HTML)
 @Blocking
+@RolesAllowed({ "admin", "tam", "superuser" })
 public class ReportResource {
     private static final String BUCKET_UNDER_1H = "< 1h";
     private static final String BUCKET_1_TO_8H = "1–8h";
@@ -38,26 +45,26 @@ public class ReportResource {
     @Inject
     PdfService pdfService;
 
+    @Inject
+    CurrentUser currentUser;
+
     @GET
-    public Object adminReports(@CookieParam(AuthHelper.AUTH_COOKIE) String auth,
-            @QueryParam("companyId") Long companyId, @QueryParam("period") String period) {
-        requireAdmin(auth);
+    @RolesAllowed("admin")
+    public Object adminReports(@QueryParam("companyId") Long companyId, @QueryParam("period") String period) {
         return Response.seeOther(URI.create("/reports" + reportQuery(companyId, period))).build();
     }
 
     @GET
     @Path("/tam")
-    public Object tamReports(@CookieParam(AuthHelper.AUTH_COOKIE) String auth, @QueryParam("companyId") Long companyId,
-            @QueryParam("period") String period) {
-        requireTam(auth);
+    @RolesAllowed("tam")
+    public Object tamReports(@QueryParam("companyId") Long companyId, @QueryParam("period") String period) {
         return Response.seeOther(URI.create("/reports" + reportQuery(companyId, period))).build();
     }
 
     @GET
     @Path("/superuser")
-    public Object superuserReports(@CookieParam(AuthHelper.AUTH_COOKIE) String auth,
-            @QueryParam("companyId") Long companyId, @QueryParam("period") String period) {
-        requireSuperuser(auth);
+    @RolesAllowed("superuser")
+    public Object superuserReports(@QueryParam("companyId") Long companyId, @QueryParam("period") String period) {
         return Response.seeOther(URI.create("/reports" + reportQuery(companyId, period))).build();
     }
 
@@ -76,20 +83,19 @@ public class ReportResource {
     @Path("/export")
     @Produces("application/pdf")
     @Consumes(MediaType.APPLICATION_FORM_URLENCODED)
-    public Response exportAdminReport(@CookieParam(AuthHelper.AUTH_COOKIE) String auth,
-            @QueryParam("companyId") Long companyId, @QueryParam("period") String period,
+    @RolesAllowed("admin")
+    public Response exportAdminReport(@QueryParam("companyId") Long companyId, @QueryParam("period") String period,
             @FormParam("statusChart") String statusChart, @FormParam("categoryChart") String categoryChart,
             @FormParam("companyChart") String companyChart, @FormParam("timeChart") String timeChart,
             @FormParam("responseTimeChart") String responseTimeChart,
             @FormParam("resolutionTimeChart") String resolutionTimeChart,
-            @FormParam("histogramChart") String histogramChart) {
-        requireAdmin(auth);
+            @FormParam("pickupTimeChart") String pickupTimeChart, @FormParam("histogramChart") String histogramChart) {
         Company selectedCompany = companyId != null ? Company.findById(companyId) : null;
         String safePeriod = period == null || period.isBlank() ? "all" : period.toLowerCase();
         ReportData data = buildReportData(selectedCompany != null ? List.of(selectedCompany) : null, safePeriod);
         String companyName = selectedCompany == null ? "All" : selectedCompany.name;
         Map<String, String> chartImages = buildChartImages(statusChart, categoryChart, companyChart, timeChart,
-                responseTimeChart, resolutionTimeChart, histogramChart);
+                responseTimeChart, resolutionTimeChart, pickupTimeChart, histogramChart);
         byte[] pdf = pdfService.generateReportPdf(data, companyName, safePeriod, selectedCompany == null, chartImages);
         String filename = "report-" + companyName.toLowerCase().replace(" ", "-") + ".pdf";
         return Response.ok(pdf).header("Content-Disposition", "attachment; filename=\"" + filename + "\"").build();
@@ -99,14 +105,14 @@ public class ReportResource {
     @Path("/tam/export")
     @Produces("application/pdf")
     @Consumes(MediaType.APPLICATION_FORM_URLENCODED)
-    public Response exportTamReport(@CookieParam(AuthHelper.AUTH_COOKIE) String auth,
-            @QueryParam("companyId") Long companyId, @QueryParam("period") String period,
+    @RolesAllowed("tam")
+    public Response exportTamReport(@QueryParam("companyId") Long companyId, @QueryParam("period") String period,
             @FormParam("statusChart") String statusChart, @FormParam("categoryChart") String categoryChart,
             @FormParam("companyChart") String companyChart, @FormParam("timeChart") String timeChart,
             @FormParam("responseTimeChart") String responseTimeChart,
             @FormParam("resolutionTimeChart") String resolutionTimeChart,
-            @FormParam("histogramChart") String histogramChart) {
-        User user = requireTam(auth);
+            @FormParam("pickupTimeChart") String pickupTimeChart, @FormParam("histogramChart") String histogramChart) {
+        User user = currentUser.get();
         List<Company> tamCompanies = Company.list(
                 "select distinct c from Company c join c.users u where u = ?1 and exists (select t from Ticket t where t.company = c) order by c.name",
                 user);
@@ -119,7 +125,7 @@ public class ReportResource {
         ReportData data = buildReportData(dataFilter, safePeriod);
         String companyName = selectedCompany != null ? selectedCompany.name : "All";
         Map<String, String> chartImages = buildChartImages(statusChart, categoryChart, null, timeChart,
-                responseTimeChart, resolutionTimeChart, histogramChart);
+                responseTimeChart, resolutionTimeChart, pickupTimeChart, histogramChart);
         byte[] pdf = pdfService.generateReportPdf(data, companyName, safePeriod, false, chartImages);
         String filename = "report-" + companyName.toLowerCase().replace(" ", "-") + ".pdf";
         return Response.ok(pdf).header("Content-Disposition", "attachment; filename=\"" + filename + "\"").build();
@@ -129,14 +135,14 @@ public class ReportResource {
     @Path("/superuser/export")
     @Produces("application/pdf")
     @Consumes(MediaType.APPLICATION_FORM_URLENCODED)
-    public Response exportSuperuserReport(@CookieParam(AuthHelper.AUTH_COOKIE) String auth,
-            @QueryParam("companyId") Long companyId, @QueryParam("period") String period,
+    @RolesAllowed("superuser")
+    public Response exportSuperuserReport(@QueryParam("companyId") Long companyId, @QueryParam("period") String period,
             @FormParam("statusChart") String statusChart, @FormParam("categoryChart") String categoryChart,
             @FormParam("companyChart") String companyChart, @FormParam("timeChart") String timeChart,
             @FormParam("responseTimeChart") String responseTimeChart,
             @FormParam("resolutionTimeChart") String resolutionTimeChart,
-            @FormParam("histogramChart") String histogramChart) {
-        User user = requireSuperuser(auth);
+            @FormParam("pickupTimeChart") String pickupTimeChart, @FormParam("histogramChart") String histogramChart) {
+        User user = currentUser.get();
         List<Company> superuserCompanies = Company.list(
                 "select distinct c from Company c join c.users u where u = ?1 and exists (select t from Ticket t where t.company = c) order by c.name",
                 user);
@@ -146,7 +152,7 @@ public class ReportResource {
         ReportData data = buildReportData(dataFilter, safePeriod);
         String companyName = selectedCompany != null ? selectedCompany.name : "All";
         Map<String, String> chartImages = buildChartImages(statusChart, categoryChart, null, timeChart,
-                responseTimeChart, resolutionTimeChart, histogramChart);
+                responseTimeChart, resolutionTimeChart, pickupTimeChart, histogramChart);
         byte[] pdf = pdfService.generateReportPdf(data, companyName, safePeriod, false, chartImages);
         String filename = "report-" + companyName.toLowerCase().replace(" ", "-") + ".pdf";
         return Response.ok(pdf).header("Content-Disposition", "attachment; filename=\"" + filename + "\"").build();
@@ -186,8 +192,9 @@ public class ReportResource {
         data.ticketsByCategory = buildTicketsByCategory(tickets);
         data.ticketsByCompany = buildTicketsByCompany(tickets);
         data.ticketsOverTime = buildTicketsOverTime(messagesByTicket, period);
-        data.avgFirstResponseTime = buildAvgFirstResponseTime(tickets, messagesByTicket);
+        data.firstResponseTimeStats = buildFirstResponseTimeStats(tickets, messagesByTicket);
         data.avgResolutionTime = buildAvgResolutionTime(tickets, messagesByTicket);
+        data.pickupTimeStats = buildPickupTimeStats(tickets);
         data.resolutionHistogram = buildResolutionHistogram(tickets, messagesByTicket);
         return data;
     }
@@ -256,7 +263,7 @@ public class ReportResource {
         return result;
     }
 
-    private Map<String, Double> buildAvgFirstResponseTime(List<Ticket> tickets,
+    private Map<String, TimeStat> buildFirstResponseTimeStats(List<Ticket> tickets,
             Map<Long, List<Message>> messagesByTicket) {
         Map<String, List<Double>> hoursByCategory = new LinkedHashMap<>();
         for (Ticket ticket : tickets) {
@@ -285,13 +292,18 @@ public class ReportResource {
                     : "Uncategorized";
             hoursByCategory.computeIfAbsent(category, k -> new ArrayList<>()).add(hours);
         }
-        Map<String, Double> unsorted = new LinkedHashMap<>();
+        Map<String, TimeStat> unsorted = new LinkedHashMap<>();
         for (Map.Entry<String, List<Double>> entry : hoursByCategory.entrySet()) {
-            double avg = entry.getValue().stream().mapToDouble(Double::doubleValue).average().orElse(0.0);
-            unsorted.put(entry.getKey(), Math.round(avg * 10.0) / 10.0);
+            List<Double> values = entry.getValue();
+            double min = values.stream().mapToDouble(Double::doubleValue).min().orElse(0.0);
+            double avg = values.stream().mapToDouble(Double::doubleValue).average().orElse(0.0);
+            double max = values.stream().mapToDouble(Double::doubleValue).max().orElse(0.0);
+            unsorted.put(entry.getKey(), new TimeStat(Math.round(min * 10.0) / 10.0, Math.round(avg * 10.0) / 10.0,
+                    Math.round(max * 10.0) / 10.0));
         }
-        Map<String, Double> result = new LinkedHashMap<>();
-        unsorted.entrySet().stream().sorted(Map.Entry.<String, Double> comparingByValue().reversed())
+        Map<String, TimeStat> result = new LinkedHashMap<>();
+        unsorted.entrySet().stream()
+                .sorted((left, right) -> Double.compare(right.getValue().avg(), left.getValue().avg()))
                 .forEachOrdered(e -> result.put(e.getKey(), e.getValue()));
         return result;
     }
@@ -328,6 +340,67 @@ public class ReportResource {
         Map<String, Double> result = new LinkedHashMap<>();
         unsorted.entrySet().stream().sorted(Map.Entry.<String, Double> comparingByValue().reversed())
                 .forEachOrdered(e -> result.put(e.getKey(), e.getValue()));
+        return result;
+    }
+
+    private Map<String, PickupTimeStat> buildPickupTimeStats(List<Ticket> tickets) {
+        Map<Long, LocalDateTime> openedByTicket = new LinkedHashMap<>();
+        Map<Long, LocalDateTime> assignedByTicket = new LinkedHashMap<>();
+        List<Long> ticketIds = new ArrayList<>();
+        for (Ticket ticket : tickets) {
+            if (ticket.id != null) {
+                ticketIds.add(ticket.id);
+            }
+        }
+        if (!ticketIds.isEmpty()) {
+            List<Event> events = Event.find("key in ?1 and eventType in ?2 order by createdAt asc", ticketIds,
+                    List.of(EventConstants.TICKET_OPENED, EventConstants.TICKET_ASSIGNED)).list();
+            for (Event event : events) {
+                if (event.key == null || event.createdAt == null || event.eventType == null) {
+                    continue;
+                }
+                if (event.eventType == EventConstants.TICKET_OPENED) {
+                    openedByTicket.putIfAbsent(event.key, event.createdAt);
+                }
+            }
+            for (Event event : events) {
+                if (event.key == null || event.createdAt == null || event.eventType == null) {
+                    continue;
+                }
+                if (event.eventType == EventConstants.TICKET_ASSIGNED && !assignedByTicket.containsKey(event.key)) {
+                    LocalDateTime opened = openedByTicket.get(event.key);
+                    if (opened != null && !event.createdAt.isBefore(opened)) {
+                        assignedByTicket.put(event.key, event.createdAt);
+                    }
+                }
+            }
+        }
+        LocalDateTime now = LocalDateTime.now();
+        Map<String, List<Double>> hoursByCategory = new LinkedHashMap<>();
+        for (Ticket ticket : tickets) {
+            LocalDateTime opened = openedByTicket.get(ticket.id);
+            if (opened == null) {
+                continue;
+            }
+            LocalDateTime assigned = assignedByTicket.getOrDefault(ticket.id, now);
+            double hours = TicketTimeSupport.elapsedMinutes(opened, assigned) / 60.0;
+            String category = ticket.category != null && ticket.category.name != null ? ticket.category.name
+                    : "Uncategorized";
+            hoursByCategory.computeIfAbsent(category, ignored -> new ArrayList<>()).add(hours);
+        }
+        Map<String, PickupTimeStat> unsorted = new LinkedHashMap<>();
+        for (Map.Entry<String, List<Double>> entry : hoursByCategory.entrySet()) {
+            List<Double> values = entry.getValue();
+            double min = values.stream().mapToDouble(Double::doubleValue).min().orElse(0.0);
+            double average = values.stream().mapToDouble(Double::doubleValue).average().orElse(0.0);
+            double max = values.stream().mapToDouble(Double::doubleValue).max().orElse(0.0);
+            unsorted.put(entry.getKey(), new PickupTimeStat(Math.round(min * 10.0) / 10.0,
+                    Math.round(average * 10.0) / 10.0, Math.round(max * 10.0) / 10.0));
+        }
+        Map<String, PickupTimeStat> result = new LinkedHashMap<>();
+        unsorted.entrySet().stream()
+                .sorted((left, right) -> Double.compare(right.getValue().avg(), left.getValue().avg()))
+                .forEachOrdered(entry -> result.put(entry.getKey(), entry.getValue()));
         return result;
     }
 
@@ -370,7 +443,8 @@ public class ReportResource {
     }
 
     private Map<String, String> buildChartImages(String statusChart, String categoryChart, String companyChart,
-            String timeChart, String responseTimeChart, String resolutionTimeChart, String histogramChart) {
+            String timeChart, String responseTimeChart, String resolutionTimeChart, String pickupTimeChart,
+            String histogramChart) {
         Map<String, String> images = new LinkedHashMap<>();
         images.put("statusChart", statusChart);
         images.put("categoryChart", categoryChart);
@@ -378,31 +452,9 @@ public class ReportResource {
         images.put("timeChart", timeChart);
         images.put("responseTimeChart", responseTimeChart);
         images.put("resolutionTimeChart", resolutionTimeChart);
+        images.put("pickupTimeChart", pickupTimeChart);
         images.put("histogramChart", histogramChart);
         return images;
     }
 
-    private User requireAdmin(String auth) {
-        User user = AuthHelper.findUser(auth);
-        if (!AuthHelper.isAdmin(user)) {
-            throw new WebApplicationException(Response.seeOther(URI.create("/")).build());
-        }
-        return user;
-    }
-
-    private User requireTam(String auth) {
-        User user = AuthHelper.findUser(auth);
-        if (user == null || !User.TYPE_TAM.equalsIgnoreCase(user.type)) {
-            throw new WebApplicationException(Response.seeOther(URI.create("/")).build());
-        }
-        return user;
-    }
-
-    private User requireSuperuser(String auth) {
-        User user = AuthHelper.findUser(auth);
-        if (user == null || !User.TYPE_SUPERUSER.equalsIgnoreCase(user.type)) {
-            throw new WebApplicationException(Response.seeOther(URI.create("/")).build());
-        }
-        return user;
-    }
 }

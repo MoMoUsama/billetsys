@@ -244,22 +244,49 @@ public class PdfService {
             }
             document.add(Chunk.NEWLINE);
 
-            // Avg First Response Time
-            document.add(new Paragraph("Avg. First Response Time (hours)", sectionFont));
+            // First Response Time
+            document.add(new Paragraph("First Response Time (hours)", sectionFont));
             document.add(Chunk.NEWLINE);
             addChartImage(document, chartImages, "responseTimeChart");
-            if (data.avgFirstResponseTime.isEmpty()) {
+            if (data.firstResponseTimeStats == null || data.firstResponseTimeStats.isEmpty()) {
                 document.add(new Paragraph("No data available", normalFont));
             } else {
-                PdfPTable responseTable = new PdfPTable(2);
+                PdfPTable responseTable = new PdfPTable(4);
                 responseTable.setWidthPercentage(100);
                 responseTable.addCell(createCell("Category", red, Color.WHITE));
+                responseTable.addCell(createCell("Min. Hours", red, Color.WHITE));
                 responseTable.addCell(createCell("Avg. Hours", red, Color.WHITE));
-                for (Map.Entry<String, Double> entry : data.avgFirstResponseTime.entrySet()) {
+                responseTable.addCell(createCell("Max. Hours", red, Color.WHITE));
+                for (Map.Entry<String, TimeStat> entry : data.firstResponseTimeStats.entrySet()) {
                     responseTable.addCell(new Phrase(entry.getKey(), normalFont));
-                    responseTable.addCell(new Phrase(String.valueOf(entry.getValue()), normalFont));
+                    responseTable.addCell(new Phrase(String.valueOf(entry.getValue().min()), normalFont));
+                    responseTable.addCell(new Phrase(String.valueOf(entry.getValue().avg()), normalFont));
+                    responseTable.addCell(new Phrase(String.valueOf(entry.getValue().max()), normalFont));
                 }
                 document.add(responseTable);
+            }
+            document.add(Chunk.NEWLINE);
+
+            // Pickup Time
+            document.add(new Paragraph("Pickup Time (hours)", sectionFont));
+            document.add(Chunk.NEWLINE);
+            addChartImage(document, chartImages, "pickupTimeChart");
+            if (data.pickupTimeStats == null || data.pickupTimeStats.isEmpty()) {
+                document.add(new Paragraph("No data available", normalFont));
+            } else {
+                PdfPTable pickupTable = new PdfPTable(4);
+                pickupTable.setWidthPercentage(100);
+                pickupTable.addCell(createCell("Category", red, Color.WHITE));
+                pickupTable.addCell(createCell("Min. Hours", red, Color.WHITE));
+                pickupTable.addCell(createCell("Avg. Hours", red, Color.WHITE));
+                pickupTable.addCell(createCell("Max. Hours", red, Color.WHITE));
+                for (Map.Entry<String, PickupTimeStat> entry : data.pickupTimeStats.entrySet()) {
+                    pickupTable.addCell(new Phrase(entry.getKey(), normalFont));
+                    pickupTable.addCell(new Phrase(String.valueOf(entry.getValue().min()), normalFont));
+                    pickupTable.addCell(new Phrase(String.valueOf(entry.getValue().avg()), normalFont));
+                    pickupTable.addCell(new Phrase(String.valueOf(entry.getValue().max()), normalFont));
+                }
+                document.add(pickupTable);
             }
             document.add(Chunk.NEWLINE);
 
